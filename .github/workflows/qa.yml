@@ -2,59 +2,66 @@ name: Push to GitLab QA & open MR
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch: {}
+    branches: [ main ]      # use main só para o teste; ajuste se quiser
+  workflow_dispatch: {}     # permite rodar manualmente
 
 jobs:
   push-and-mr:
     runs-on: ubuntu-latest
 
-    env:
-      GL_TOKEN:         ${{ secrets.GITLAB_QA_TOKEN }}
-      GL_QA_USERNAME:   ${{ secrets.GITLAB_QA_USERNAME }}
-      GL_QA_REPO:       ${{ secrets.GITLAB_QA_REPO }}
-      GL_QA_PROJECT_ID: ${{ secrets.GITLAB_QA_PROJECT_ID }}
-      GL_LABELS:        frontend,auto
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
 
       - name: Compute remote branch (dev/<actor>/frontend)
-        id: vars
+        id: v
         run: |
           ACTOR="$(echo "${GITHUB_ACTOR}" | tr '[:upper:]' '[:lower:]')"
-          echo "remote=dev/${ACTOR}/frontend" >> $GITHUB_OUTPUT
+          echo "actor=${ACTOR}" >> "$GITHUB_OUTPUT"
+          echo "remote=dev/${ACTOR}/frontend" >> "$GITHUB_OUTPUT"
 
       - name: Preflight: token can read the project?
+        env:
+          GL_TOKEN:   ${{ secrets.GITLAB_QA_TOKEN }}
+          GL_PROJECT: ${{ secrets.GITLAB_QA_PROJECT_ID }}
         run: |
           set -euo pipefail
           curl -sSf --header "PRIVATE-TOKEN: ${GL_TOKEN}" \
-            "https://gitlab.com/api/v4/projects/${GL_QA_PROJECT_ID}" > /dev/null
+            "https://gitlab.com/api/v4/projects/${GL_PROJECT}" > /dev/null
+          echo "Token OK para acessar o projeto ${GL_PROJECT}"
 
       - name: Push to QA fork (no force)
+        env:
+          GL_USER: ${{ secrets.GITLAB_QA_USERNAME }}
+          GL_TOKEN: ${{ secrets.GITLAB_QA_TOKEN }}
+          GL_REPO: ${{ secrets.GITLAB_QA_REPO }}
         run: |
           set -euo pipefail
-          AUTH_URL="${GL_QA_REPO/https:\/\//https:\/\/${GL_QA_USERNAME}:${GL_TOKEN}@}"
-          git remote add gitlab-qa "$AUTH_URL" || git remote set-url gitlab-qa "$AUTH_URL"
-          git push gitlab-qa main:refs/heads/${{ steps.vars.outputs.remote }}
+          # monta https://<user>:<token>@gitlab.com/namespace/projeto.git
+          AUTH_URL="${GL_REPO/https:\/\//https:\/\/${GL_USER}:${GL_TOKEN}@}"
+          git remote add qa "$AUTH_URL" || git remote set-url qa "$AUTH_URL"
+          git push qa main:refs/heads/${{ steps.v.outputs.remote }}
 
       - name: Install jq
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
 
-      - name: Open/ensure MR (dev/<actor>/frontend -> frontend)
+      - name: Ensure MR (dev/<actor>/frontend -> frontend)
         env:
-          API: https://gitlab.com/api/v4
+          GL_TOKEN:   ${{ secrets.GITLAB_QA_TOKEN }}
+          GL_PROJECT: ${{ secrets.GITLAB_QA_PROJECT_ID }}
+          SRC:        ${{ steps.v.outputs.remote }}
         run: |
           set -euo pipefail
-          SRC="${{ steps.vars.outputs.remote }}"
+          API="https://gitlab.com/api/v4"
           TARGET="frontend"
 
+          # verifica se já existe MR aberto
           EXISTING=$(curl -s --header "PRIVATE-TOKEN: ${GL_TOKEN}" \
-            "${API}/projects/${GL_QA_PROJECT_ID}/merge_requests?state=opened&source_branch=${SRC}&target_branch=${TARGET}" \
+            "${API}/projects/${GL_PROJECT}/merge_requests?state=opened&source_branch=${SRC}&target_branch=${TARGET}" \
             | jq '.[0]')
 
           if [ "$EXISTING" != "null" ] && [ -n "$EXISTING" ]; then
@@ -65,10 +72,11 @@ jobs:
 
           TITLE="[auto] ${SRC} → ${TARGET}"
           DESC="Criado automaticamente do GitHub (${GITHUB_REPOSITORY}@${GITHUB_SHA})"
+
           curl -s --request POST --header "PRIVATE-TOKEN: ${GL_TOKEN}" \
             --data-urlencode "title=${TITLE}" \
             --data-urlencode "description=${DESC}" \
-            --data "source_branch=${SRC}&target_branch=${TARGET}&remove_source_branch=true&labels=${GL_LABELS}" \
-            "${API}/projects/${GL_QA_PROJECT_ID}/merge_requests" > /dev/null
+            --data "source_branch=${SRC}&target_branch=${TARGET}&remove_source_branch=true" \
+            "${API}/projects/${GL_PROJECT}/merge_requests" > /dev/null
 
           echo "MR criado para ${SRC} -> ${TARGET}"
