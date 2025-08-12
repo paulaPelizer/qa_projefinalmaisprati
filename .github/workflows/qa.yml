@@ -1,0 +1,79 @@
+name: Push to GitLab QA & open MR
+
+on:
+  push:
+    branches: [ main ]          # simples pra teste: qualquer push no main
+  workflow_dispatch: {}         # permite rodar manualmente
+
+jobs:
+  push-and-mr:
+    runs-on: ubuntu-latest
+
+    env:
+      GL_TOKEN:         ${{ secrets.GITLAB_QA_TOKEN }}
+      GL_QA_REPO:       ${{ secrets.GITLAB_QA_REPO }}
+      GL_QA_PROJECT_ID: ${{ secrets.GITLAB_QA_PROJECT_ID }}
+      GL_LABELS:        ${{ secrets.GITLAB_QA_LABELS }}      # opcional
+      GL_ASSIGNEE_ID:   ${{ secrets.GITLAB_QA_ASSIGNEE_ID }} # opcional
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute remote branch (dev/<actor>/frontend)
+        id: vars
+        run: |
+          ACTOR="$(echo "${GITHUB_ACTOR}" | tr '[:upper:]' '[:lower:]')"
+          echo "actor=${ACTOR}" >> $GITHUB_OUTPUT
+          echo "remote=dev/${ACTOR}/frontend" >> $GITHUB_OUTPUT
+
+      - name: Push to QA fork (no force)
+        run: |
+          set -euo pipefail
+          AUTH_URL="${GL_QA_REPO/https:\/\//https:\/\/oauth2:${GL_TOKEN}@}"
+          git remote add gitlab-qa "$AUTH_URL" || true
+          # envia seu 'main' do GitHub para dev/<actor>/frontend no fork QA
+          git push gitlab-qa main:refs/heads/${{ steps.vars.outputs.remote }}
+
+      - name: Install jq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Open/ensure MR (dev/<actor>/frontend -> frontend)
+        env:
+          API: https://gitlab.com/api/v4
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.vars.outputs.remote }}"
+          TARGET="frontend"
+
+          # Reaproveita MR aberto, se já existir
+          EXISTING=$(curl -s --header "PRIVATE-TOKEN: ${GL_TOKEN}" \
+            "${API}/projects/${GL_QA_PROJECT_ID}/merge_requests?state=opened&source_branch=${SRC}&target_branch=${TARGET}" \
+            | jq '.[0]')
+
+          if [ "$EXISTING" != "null" ] && [ -n "$EXISTING" ]; then
+            IID=$(echo "$EXISTING" | jq -r '.iid')
+            echo "MR já existe (iid=${IID}) para ${SRC} -> ${TARGET}"
+            exit 0
+          fi
+
+          TITLE="[auto] ${SRC} → ${TARGET}"
+          DESC="Criado automaticamente do GitHub (${GITHUB_REPOSITORY}@${GITHUB_SHA})"
+          DATA="title=${TITLE}&description=${DESC}&source_branch=${SRC}&target_branch=${TARGET}&remove_source_branch=true"
+
+          if [ -n "${GL_LABELS:-}" ]; then
+            DATA="${DATA}&labels=${GL_LABELS}"
+          fi
+          if [ -n "${GL_ASSIGNEE_ID:-}" ]; then
+            DATA="${DATA}&assignee_id=${GL_ASSIGNEE_ID}"
+          fi
+
+          curl -s --request POST --header "PRIVATE-TOKEN: ${GL_TOKEN}" \
+            --data "${DATA}" \
+            "${API}/projects/${GL_QA_PROJECT_ID}/merge_requests" >/dev/null
+
+          echo "MR criado para ${SRC} -> ${TARGET}"
