@@ -2,8 +2,8 @@ name: Push to GitLab QA & open MR
 
 on:
   push:
-    branches: [ main ]          # simples pra teste: qualquer push no main
-  workflow_dispatch: {}         # permite rodar manualmente
+    branches: [ main ]
+  workflow_dispatch: {}
 
 jobs:
   push-and-mr:
@@ -11,30 +11,33 @@ jobs:
 
     env:
       GL_TOKEN:         ${{ secrets.GITLAB_QA_TOKEN }}
+      GL_QA_USERNAME:   ${{ secrets.GITLAB_QA_USERNAME }}
       GL_QA_REPO:       ${{ secrets.GITLAB_QA_REPO }}
       GL_QA_PROJECT_ID: ${{ secrets.GITLAB_QA_PROJECT_ID }}
-      GL_LABELS:        ${{ secrets.GITLAB_QA_LABELS }}      # opcional
-      GL_ASSIGNEE_ID:   ${{ secrets.GITLAB_QA_ASSIGNEE_ID }} # opcional
+      GL_LABELS:        frontend,auto
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
       - name: Compute remote branch (dev/<actor>/frontend)
         id: vars
         run: |
           ACTOR="$(echo "${GITHUB_ACTOR}" | tr '[:upper:]' '[:lower:]')"
-          echo "actor=${ACTOR}" >> $GITHUB_OUTPUT
           echo "remote=dev/${ACTOR}/frontend" >> $GITHUB_OUTPUT
+
+      - name: Preflight: token can read the project?
+        run: |
+          set -euo pipefail
+          curl -sSf --header "PRIVATE-TOKEN: ${GL_TOKEN}" \
+            "https://gitlab.com/api/v4/projects/${GL_QA_PROJECT_ID}" > /dev/null
 
       - name: Push to QA fork (no force)
         run: |
           set -euo pipefail
-          AUTH_URL="${GL_QA_REPO/https:\/\//https:\/\/oauth2:${GL_TOKEN}@}"
-          git remote add gitlab-qa "$AUTH_URL" || true
-          # envia seu 'main' do GitHub para dev/<actor>/frontend no fork QA
+          AUTH_URL="${GL_QA_REPO/https:\/\//https:\/\/${GL_QA_USERNAME}:${GL_TOKEN}@}"
+          git remote add gitlab-qa "$AUTH_URL" || git remote set-url gitlab-qa "$AUTH_URL"
           git push gitlab-qa main:refs/heads/${{ steps.vars.outputs.remote }}
 
       - name: Install jq
@@ -50,7 +53,6 @@ jobs:
           SRC="${{ steps.vars.outputs.remote }}"
           TARGET="frontend"
 
-          # Reaproveita MR aberto, se já existir
           EXISTING=$(curl -s --header "PRIVATE-TOKEN: ${GL_TOKEN}" \
             "${API}/projects/${GL_QA_PROJECT_ID}/merge_requests?state=opened&source_branch=${SRC}&target_branch=${TARGET}" \
             | jq '.[0]')
@@ -63,17 +65,10 @@ jobs:
 
           TITLE="[auto] ${SRC} → ${TARGET}"
           DESC="Criado automaticamente do GitHub (${GITHUB_REPOSITORY}@${GITHUB_SHA})"
-          DATA="title=${TITLE}&description=${DESC}&source_branch=${SRC}&target_branch=${TARGET}&remove_source_branch=true"
-
-          if [ -n "${GL_LABELS:-}" ]; then
-            DATA="${DATA}&labels=${GL_LABELS}"
-          fi
-          if [ -n "${GL_ASSIGNEE_ID:-}" ]; then
-            DATA="${DATA}&assignee_id=${GL_ASSIGNEE_ID}"
-          fi
-
           curl -s --request POST --header "PRIVATE-TOKEN: ${GL_TOKEN}" \
-            --data "${DATA}" \
-            "${API}/projects/${GL_QA_PROJECT_ID}/merge_requests" >/dev/null
+            --data-urlencode "title=${TITLE}" \
+            --data-urlencode "description=${DESC}" \
+            --data "source_branch=${SRC}&target_branch=${TARGET}&remove_source_branch=true&labels=${GL_LABELS}" \
+            "${API}/projects/${GL_QA_PROJECT_ID}/merge_requests" > /dev/null
 
           echo "MR criado para ${SRC} -> ${TARGET}"
