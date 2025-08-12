@@ -31,7 +31,7 @@ jobs:
       - name: Push to GitLab QA fork
         env:
           # URL HTTPS do fork QA (Clone → HTTPS no GitLab QA)
-          GITLAB_QA_REPO_URL: https://gitlab.com/<seu-namespace>/<fork-qa>.git
+          GITLAB_QA_REPO: https://gitlab.com/<seu-namespace>/<fork-qa>.git
           GITLAB_QA_TOKEN: ${{ secrets.GITLAB_QA_TOKEN }}
         run: |
           # monta URL autenticada
