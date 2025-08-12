@@ -1,64 +1,33 @@
-name: Mirror to GitLab QA
+name: Push para fork QA no GitLab
 
 on:
   push:
     branches:
-      - "**"
-    tags:
-      - "**"
-  delete:
-    branches:
-      - "**"
-    tags:
-      - "**"
-  workflow_dispatch:
+      - "frontend/**"   # só dispara se for um branch do tipo frontend/<usuario>
 
 jobs:
-  mirror:
+  push-to-fork:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout full history
+      - name: Checkout do código
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set git identity
+      - name: Configurar Git com usuário do commit
         run: |
-          git config user.name "GitHub→GitLab QA Mirror Bot"
-          git config user.email "mirror-bot@users.noreply.github.com"
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
 
-      - name: Push to GitLab QA fork
-        env:
-          # URL HTTPS do fork QA (Clone → HTTPS no GitLab QA)
-          GITLAB_QA_REPO: https://gitlab.com/<seu-namespace>/<fork-qa>.git
-          GITLAB_QA_TOKEN: ${{ secrets.GITLAB_QA_TOKEN }}
+      - name: Definir branch destino no fork QA
+        id: setbranch
         run: |
-          # monta URL autenticada
-          AUTH_URL="${GITLAB_QA_REPO_URL/https:\/\//https:\/\/oauth2:${GITLAB_QA_TOKEN}@}"
-          git remote add gitlab-qa "$AUTH_URL"
+          # Pega o nome do branch local sem o "refs/heads/"
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          echo "branch_destino=${BRANCH_NAME}" >> $GITHUB_OUTPUT
 
-          # Se for deleção
-          if [[ "${GITHUB_EVENT_NAME}" == "delete" ]]; then
-            REF="${GITHUB_REF#refs/}"
-            git push gitlab-qa ":${REF}"
-            exit 0
-          fi
+      - name: Adicionar remote do fork QA
+        run: |
+          git remote add fork-qa https://oauth2:${{ secrets.GITLAB_QA_TOKEN }}@gitlab.com/SEU_GRUPO/projetofinalmaisprati_qa.git
 
-          # Se for tag
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-            git push gitlab-qa "refs/tags/${TAG}:refs/tags/${TAG}"
-          else
-            BRANCH="${GITHUB_REF#refs/heads/}"
-
-            # monta destino dev/<actor>/frontend
-            ACTOR="$(echo "${GITHUB_ACTOR}" | tr '[:upper:]' '[:lower:]')"
-            DEST_BRANCH="dev/${ACTOR}/frontend"
-
-            # pega estado atual no GitLab QA
-            git fetch --no-tags gitlab-qa "${DEST_BRANCH}" || true
-
-            # envia respeitando alterações novas
-            git push --force-with-lease gitlab-qa "HEAD:refs/heads/${DEST_BRANCH}"
-          fi
+      - name: Push para branch no fork QA
+        run: |
+          git push fork-qa HEAD:${{ steps.setbranch.outputs.branch_destino }}
